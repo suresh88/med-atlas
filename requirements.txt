@@ -1,0 +1,13 @@
+numpy
+pandas
+regex
+matplotlib
+plotly
+networkx
+tqdm
+nltk
+fuzzywuzzy
+requests
+openpyxl
+pyvis
+
