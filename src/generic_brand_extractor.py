@@ -2,13 +2,12 @@
 
 This utility loads an Excel workbook containing a ``Drug Name`` column and
 produces two new columns – ``Generic Name`` and ``Brand Name`` – by parsing
-free‑form drug descriptions.  The extractor combines fast heuristics with an
-optional GPT fallback (``gpt-4o-mini`` by default) for ambiguous entries.  Each
-row receives a confidence score and annotation of the extraction method, while a
-summary report captures overall quality metrics.  The heuristic engine has been
-extended to recognise a broader spectrum of separators, salt forms, dosage
-notations, and keyword hints commonly used in payer formularies, which results
-in higher confidence scores without the need for heavy language-model usage.
+free‑form drug descriptions.  Every record is routed through a GPT model
+(``gpt-4o-mini`` by default) to obtain a structured extraction, while a
+lightweight heuristic layer cleans and validates the response (for example,
+removing dosage-form descriptors such as “intravenous solution”).  Each row
+receives a confidence score and annotation of the extraction method, and a
+summary report captures overall quality metrics.
 """
 
 from __future__ import annotations
