@@ -92,15 +92,75 @@ class GenericBrandExtractor:
         (re.compile(r"\s+or\s+", re.IGNORECASE), "|"),
     )
 
+    FORMULATION_TERMS = {
+        "caplet",
+        "caplets",
+        "capsule",
+        "capsules",
+        "cream",
+        "drops",
+        "dr",
+        "elixir",
+        "er",
+        "extended",
+        "film",
+        "gel",
+        "im",
+        "inhalation",
+        "injection",
+        "intramuscular",
+        "intravenous",
+        "intravenous solution",
+        "ir",
+        "iu",
+        "iv",
+        "kit",
+        "lozenge",
+        "lotion",
+        "mcg",
+        "mg",
+        "nebulizer",
+        "ointment",
+        "oph",
+        "ophth",
+        "ophth.soln",
+        "ophthalmic",
+        "oral",
+        "patch",
+        "pen",
+        "powder",
+        "prefilled",
+        "release",
+        "sc",
+        "solution",
+        "spray",
+        "sr",
+        "subcutaneous",
+        "suspension",
+        "syrup",
+        "tab",
+        "tablet",
+        "tablets",
+        "tabs",
+        "topical",
+        "unit",
+        "units",
+        "xr",
+    }
+
     def __init__(
         self,
-        use_gpt: bool = False,
+        use_gpt: bool = True,
         gpt_model: str = "gpt-4o-mini",
         temperature: float = 0.0,
     ) -> None:
+        self.requested_gpt = use_gpt
         self.use_gpt = use_gpt and OpenAI is not None and bool(os.getenv("OPENAI_API_KEY"))
         if use_gpt and not self.use_gpt:
-            LOGGER.warning("GPT fallback requested but OpenAI dependencies or API key are unavailable. Using heuristics only.")
+            LOGGER.warning(
+                "GPT extraction requested but OpenAI dependencies or API key are unavailable. "
+                "Falling back to heuristics only."
+            )
         self.model = gpt_model
         self.temperature = temperature
         self._client = OpenAI(api_key=os.getenv("OPENAI_API_KEY")) if self.use_gpt else None
@@ -128,15 +188,21 @@ class GenericBrandExtractor:
         if not entry:
             return ExtractionResult(notes="empty entry")
         heuristic = self._heuristic_parse(entry)
-        if heuristic.confidence >= 0.7 or not self.use_gpt:
-            return heuristic
         gpt_result = self._gpt_parse(entry)
         if gpt_result:
+            cleaned_generic = self._strip_formulation(gpt_result.generic)
+            cleaned_brands = [self._strip_brand_noise(name) for name in gpt_result.brand_names]
+            cleaned_brands = self._dedupe([name for name in cleaned_brands if name])
+            confidence = self._confidence(
+                [cleaned_generic] if cleaned_generic else [],
+                cleaned_brands,
+                entry,
+            )
             return ExtractionResult(
-                generic=gpt_result.generic or heuristic.generic,
-                brand_names=gpt_result.brand_names or heuristic.brand_names,
-                confidence=max(heuristic.confidence, gpt_result.confidence),
-                method="heuristic+gpt" if heuristic.generic or heuristic.brand_names else "gpt",
+                generic=cleaned_generic or heuristic.generic,
+                brand_names=cleaned_brands or heuristic.brand_names,
+                confidence=max(confidence, gpt_result.confidence, heuristic.confidence),
+                method="gpt" if not heuristic.brand_names and not heuristic.generic else "gpt+heuristic",
                 notes=gpt_result.notes or heuristic.notes,
             )
         return heuristic
@@ -278,15 +344,32 @@ class GenericBrandExtractor:
     # ------------------------------------------------------------------
     # GPT fallback
     def _gpt_parse(self, entry: str) -> Optional[ExtractionResult]:
-        if not self.use_gpt or not entry:
+        if not entry:
             return None
         if entry in self._gpt_cache:
             return self._gpt_cache[entry]
 
+        if not self.use_gpt:
+            if self.requested_gpt:
+                notes = "gpt unavailable"
+            else:
+                notes = "gpt disabled"
+            cached = ExtractionResult(notes=notes)
+            self._gpt_cache[entry] = cached
+            return cached
+
         prompt = (
-            "Extract the generic and brand drug names from the entry below. "
-            "Return JSON with keys 'generic_name' (string) and 'brand_names' (list of strings). "
-            "Use empty values when uncertain. Entry:\n" + entry
+            "You are a pharmaceutical data expert. Parse the drug listing below and "
+            "identify the base generic ingredient(s) and their marketed brand name(s).\n"
+            "Return **valid JSON** with keys 'generic_name' (string) and 'brand_names' "
+            "(array of strings). Follow these rules strictly:\n"
+            "- Only include the core generic ingredient name without dosage form, strength,"
+            " administration route, or packaging words (e.g., strip 'intravenous solution',"
+            " 'tablets', 'oral suspension').\n"
+            "- If multiple generics are present, return them comma-separated in 'generic_name'.\n"
+            "- List every distinct brand name in 'brand_names'.\n"
+            "- Use empty values when a component is truly unknown.\n"
+            f"Entry: {entry}"
         )
         try:
             response = self._client.chat.completions.create(
@@ -310,9 +393,9 @@ class GenericBrandExtractor:
             result = ExtractionResult(
                 generic=generic,
                 brand_names=self._dedupe(brands),
-                confidence=0.8,
+                confidence=0.82,
                 method="gpt",
-                notes="gpt assisted",
+                notes="gpt extraction",
             )
             self._gpt_cache[entry] = result
             return result
@@ -320,6 +403,26 @@ class GenericBrandExtractor:
             LOGGER.warning("GPT parse failed for '%s': %s", entry, exc)
             self._gpt_cache[entry] = ExtractionResult(notes=f"gpt error: {exc}")
             return None
+
+    def _strip_formulation(self, text: str) -> str:
+        if not text:
+            return ""
+        tokens = [tok for tok in re.split(r"[\s\-/]+", text) if tok]
+        filtered = [tok for tok in tokens if tok.lower() not in self.FORMULATION_TERMS]
+        if not filtered and tokens:
+            filtered = tokens
+        cleaned = " ".join(filtered)
+        cleaned = re.sub(r"\b(mg|mcg|g|iu|units?)\b", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        return cleaned
+
+    def _strip_brand_noise(self, text: str) -> str:
+        if not text:
+            return ""
+        text = self._normalise(text)
+        text = re.sub(r"\b(tm|®|™)\b", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\s+", " ", text).strip()
+        return text
 
     # ------------------------------------------------------------------
     # Reporting helpers
@@ -369,7 +472,7 @@ def process_workbook(
     input_path: str,
     sheet_name: str | int | None = 0,
     output_path: Optional[str] = None,
-    use_gpt: bool = False,
+    use_gpt: bool = True,
 ) -> Dict[str, Any]:
     extractor = GenericBrandExtractor(use_gpt=use_gpt)
     df = pd.read_excel(input_path, sheet_name=sheet_name)
@@ -394,7 +497,11 @@ def _parse_cli_args() -> argparse.Namespace:
         help="Output Excel file path",
     )
     parser.add_argument("--sheet", default=0, help="Sheet name or index to load")
-    parser.add_argument("--use-gpt", action="store_true", help="Enable GPT fallback for ambiguous rows")
+    parser.add_argument(
+        "--no-gpt",
+        action="store_true",
+        help="Disable GPT extraction (heuristics will be used instead)",
+    )
     parser.add_argument("--no-save", action="store_true", help="Skip writing the enriched Excel file")
     return parser.parse_args()
 
@@ -409,7 +516,7 @@ def main() -> None:
         input_path=args.input,
         sheet_name=sheet,
         output_path=None if args.no_save else args.output,
-        use_gpt=args.use_gpt,
+        use_gpt=not args.no_gpt,
     )
     print(json.dumps(summary, indent=2))
 
