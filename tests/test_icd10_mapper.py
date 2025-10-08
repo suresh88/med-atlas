@@ -5,7 +5,11 @@ from typing import Any, Dict, List
 
 sys.path.append(str(pathlib.Path(__file__).resolve().parents[1] / "src"))
 
-from icd10_mapper import ICD10Mapper, map_disease_list
+from icd10_mapper import (
+    ICD10Mapper,
+    extract_diseases_for_drug,
+    map_disease_list,
+)
 
 
 class _StubResponse:
@@ -90,3 +94,20 @@ def test_lookup_returns_empty_when_model_response_missing_disease() -> None:
     mapper = ICD10Mapper(client=client)
 
     assert mapper.lookup("Unknown Condition") == []
+
+
+def test_extract_diseases_for_drug_returns_unique_matches(tmp_path: pathlib.Path) -> None:
+    import pandas as pd
+
+    data = pd.DataFrame(
+        {
+            "Drug Name": ["SampleDrug 500mg Tablet", "OtherDrug"],
+            "may_treat_diseases": ["['Disease A', 'Disease B', 'Disease A']", "[]"],
+        }
+    )
+    workbook = tmp_path / "workbook.xlsx"
+    data.to_excel(workbook, index=False)
+
+    diseases = extract_diseases_for_drug(workbook, "sampledrug")
+
+    assert diseases == ["Disease A", "Disease B"]

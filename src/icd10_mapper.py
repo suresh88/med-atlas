@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import argparse
 import importlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
+import sys
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 
@@ -264,10 +266,130 @@ def map_disease_list(
     ]
 
 
+def extract_diseases_for_drug(
+    excel_path: Path,
+    drug_query: str,
+    *,
+    name_column: str = "Drug Name",
+    disease_column: str = "may_treat_diseases",
+) -> List[str]:
+    """Return unique diseases associated with ``drug_query`` in the workbook."""
+
+    if not drug_query:
+        return []
+
+    import ast
+    import pandas as pd
+
+    try:
+        df = pd.read_excel(excel_path, usecols=[name_column, disease_column])
+    except ValueError:
+        df = pd.read_excel(excel_path)
+
+    if name_column not in df.columns or disease_column not in df.columns:
+        return []
+
+    mask = df[name_column].astype(str).str.contains(drug_query, case=False, na=False)
+    if not mask.any():
+        return []
+
+    diseases: List[str] = []
+    for value in df.loc[mask, disease_column].dropna():
+        if isinstance(value, str):
+            try:
+                parsed = ast.literal_eval(value)
+            except (SyntaxError, ValueError):
+                continue
+            if isinstance(parsed, (list, tuple)):
+                diseases.extend(str(item).strip() for item in parsed if str(item).strip())
+
+    seen: Dict[str, None] = {}
+    for disease in diseases:
+        key = disease
+        if key not in seen:
+            seen[key] = None
+    return list(seen.keys())
+
+
+def _default_workbook_path() -> Path:
+    root = Path(__file__).resolve().parents[1]
+    return root / "formulary_data" / "rxnav_relations_with_extracted_diseases.xlsx"
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    """Command line interface for looking up ICD-10 codes via GPT."""
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--excel-path",
+        type=Path,
+        default=_default_workbook_path(),
+        help="Path to the RxNav workbook containing may_treat disease data.",
+    )
+    parser.add_argument(
+        "--model",
+        default="gpt-4o-mini",
+        help="OpenAI model name to use for ICD-10 extraction.",
+    )
+    parser.add_argument(
+        "--max-batch-size",
+        type=int,
+        default=20,
+        help="Maximum number of diseases to send in a single GPT request.",
+    )
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=0.0,
+        help="Sampling temperature used for the GPT request.",
+    )
+
+    target_group = parser.add_mutually_exclusive_group(required=True)
+    target_group.add_argument(
+        "--drug-name",
+        help="Drug name to search for in the workbook. All may_treat diseases will be mapped.",
+    )
+    target_group.add_argument(
+        "--disease",
+        action="append",
+        dest="diseases",
+        help="Explicit disease name to map. Can be passed multiple times.",
+    )
+
+    args = parser.parse_args(argv)
+
+    mapper = ICD10Mapper(
+        model=args.model,
+        max_batch_size=args.max_batch_size,
+        temperature=args.temperature,
+    )
+
+    if args.drug_name:
+        diseases = extract_diseases_for_drug(args.excel_path, args.drug_name)
+        if not diseases:
+            parser.error(
+                f"No diseases found for drug '{args.drug_name}' in {args.excel_path}"
+            )
+    else:
+        diseases = [d for d in args.diseases or [] if d and d.strip()]
+        if not diseases:
+            parser.error("At least one --disease value is required when --drug-name is omitted.")
+
+    mappings = map_disease_list(diseases, mapper=mapper)
+    print(json.dumps(mappings, indent=2, ensure_ascii=False))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+
+
 __all__ = [
     "ICD10Mapper",
     "DiseaseMapping",
     "load_may_treat_diseases",
     "build_mapping_for_workbook",
     "map_disease_list",
+    "extract_diseases_for_drug",
+    "main",
 ]
