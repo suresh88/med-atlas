@@ -10,4 +10,5 @@ fuzzywuzzy
 requests
 openpyxl
 pyvis
+openai
 
